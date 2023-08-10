@@ -1,0 +1,95 @@
+# Pipeline for FieldSparkBoBe
+
+trigger:
+  - master
+  - dev
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  phpVersion: '8.2'
+  azureSubscription: 'resource-manager-connection-name'
+  resourceGroup: 'resource-group-name'
+  webAppName: 'web-app-name'
+  buildPath: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)'
+  rootFolder: $(System.DefaultWorkingDirectory)
+
+
+stages:
+- stage: Build
+  displayName: Build stage
+  jobs:  
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+
+    - script: |
+          sudo apt-add-repository ppa:ondrej/php
+          sudo apt-get update
+          sudo apt-get install -y php$(phpVersion) php$(phpVersion)-cli php$(phpVersion)-mbstring php$(phpVersion)-xml php$(phpVersion)-curl
+      workingDirectory: '$(rootFolder)'
+      displayName: 'Install PHP $(phpVersion)'
+
+    - script: |
+        composer validate --no-check-publish && composer install
+      workingDirectory: '$(rootFolder)/'
+      displayName: 'Install Composer and PHP dependencies'
+
+    - task: DownloadSecureFile@1
+      displayName: 'Download secure file'
+      name: firebaseCredentials
+      inputs:
+          secureFile: 'name-secure-file.txt'
+
+    - task: CopyFiles@2
+      displayName: 'Copy Secure File to Artifact Staging Directory'
+      inputs:
+        SourceFolder: '$(Agent.TempDirectory)'
+        Contents: 'name-secure-file.txt'
+        TargetFolder: '$(rootFolder)/'
+
+    - task: ArchiveFiles@2
+      inputs:
+        rootFolderOrFile: '$(rootFolder)'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        replaceExistingArchive: true
+      displayName: 'Archive application files'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish artifact: drop'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        ArtifactName: 'drop'
+      
+
+- stage: Deploy
+  displayName: 'Deploy QA Stage'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeploymentQA
+    environment: QA
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - task: DownloadBuildArtifacts@0
+              displayName: 'Download artifact: drop'
+              inputs:
+                artifactName: 'drop'
+                downloadPath: '$(Pipeline.Workspace)/'
+
+            - task: AzureRmWebAppDeployment@4
+              displayName: 'Azure Web App Deploy'
+              inputs:
+                ConnectionType: 'AzureRM'
+                azureSubscription: '$(azureSubscription)'
+                appType: 'webAppLinux'
+                WebAppName: '$(webAppName)'
+                packageForLinux: '$(Pipeline.Workspace)/drop/$(Build.BuildId).zip'
+                enableCustomDeployment: true
